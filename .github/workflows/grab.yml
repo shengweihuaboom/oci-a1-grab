@@ -1,0 +1,52 @@
+name: 抢 Oracle 服务器
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: grab
+  cancel-in-progress: false
+
+jobs:
+  grab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: 准备 OCI 命令行
+        env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OCI_CONFIG" ] || [ -z "$OCI_PRIVATE_KEY" ]; then
+            echo "::error::还没设置 Secrets：OCI_CONFIG 和 OCI_PRIVATE_KEY"; exit 1
+          fi
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_PRIVATE_KEY" | tr -d '\r' | grep -v '^OCI_API_KEY$' > ~/.oci/key.pem
+          printf '%s\n' "$OCI_CONFIG" | tr -d '\r' | grep -v '^key_file' > ~/.oci/config
+          echo "key_file=$HOME/.oci/key.pem" >> ~/.oci/config
+          chmod 600 ~/.oci/key.pem ~/.oci/config
+          for k in user fingerprint tenancy; do
+            v=$(grep -m1 "^$k" ~/.oci/config | cut -d= -f2- | tr -d ' ' || true)
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done
+          pip install --quiet --disable-pip-version-check oci-cli
+          oci --version
+
+      - name: 试一次创建 gege-api
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash grab.sh
