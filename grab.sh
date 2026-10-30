@@ -12,6 +12,20 @@ mask() { [ -n "${1:-}" ] && echo "::add-mask::$1"; return 0; }
 clean() { sed -E 's/ocid1\.[A-Za-z0-9._-]+/ocid1.***/g; s/([0-9]{1,3}\.){3}[0-9]{1,3}/x.x.x.x/g'; }
 errmsg() { tr '\n' ' ' < err.txt | grep -oE '"(code|message|status)": *("[^"]*"|[0-9]+)' | clean | tr '\n' ' '; }
 stop_workflow() { gh workflow disable "$WORKFLOW_FILE" -R "$GITHUB_REPOSITORY" && echo "已停用定时任务 $WORKFLOW_FILE"; }
+# Relay: wait, then trigger the next run of this workflow (runs started by GITHUB_TOKEN via workflow_dispatch are allowed).
+relay() {
+  sleep "${1:-240}"
+  gh workflow run "$WORKFLOW_FILE" -R "$GITHUB_REPOSITORY" --ref "${GITHUB_REF_NAME:-main}" \
+    && echo "已安排下一次尝试。" || echo "::warning::安排下一次失败，等每小时的定时检查接上。"
+}
+
+# Hourly scheduled run = watchdog: step in only if the relay has stopped.
+if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
+  OTHERS=$(gh run list -R "$GITHUB_REPOSITORY" -w "$WORKFLOW_FILE" --limit 20 --json databaseId,status \
+    --jq "[.[] | select(.databaseId != ${GITHUB_RUN_ID:-0}) | select(.status != \"completed\")] | length" 2>/dev/null)
+  if [ "${OTHERS:-0}" -gt 0 ]; then echo "接力还在进行，这次定时检查不重复尝试。"; exit 0; fi
+  echo "接力已断，由定时检查重新接上。"
+fi
 
 TENANCY=$(grep -m1 '^tenancy' ~/.oci/config | cut -d= -f2- | tr -d ' \r')
 mask "$TENANCY"
@@ -59,7 +73,7 @@ if [ $RC -eq 0 ]; then
   exit 0
 fi
 MSG=$(errmsg)
-if grep -qi 'out of host capacity' err.txt; then echo "大阪暂时没空位（Out of host capacity），下次再试。"; exit 0; fi
-if grep -qiE 'TooManyRequests|"status": *429' err.txt; then echo "被限流（Too many requests），下次再试。"; exit 0; fi
+if grep -qi 'out of host capacity' err.txt; then echo "大阪暂时没空位（Out of host capacity），下次再试。"; relay "${RELAY_DELAY:-240}"; exit 0; fi
+if grep -qiE 'TooManyRequests|"status": *429' err.txt; then echo "被限流（Too many requests），多等一会儿再试。"; relay "${RELAY_DELAY_429:-540}"; exit 0; fi
 echo "::error::创建失败，原因不是没空位：$MSG"
 exit 1
