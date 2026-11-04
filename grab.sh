@@ -19,11 +19,17 @@ relay() {
     && echo "已安排下一次尝试。" || echo "::warning::安排下一次失败，等每小时的定时检查接上。"
 }
 
-# Hourly scheduled run = watchdog: step in only if the relay has stopped.
+# Keep exactly one relay. GitHub incidents can leave duplicate queued runs or a run stuck "in progress".
+UNFINISHED=$(gh run list -R "$GITHUB_REPOSITORY" -w "$WORKFLOW_FILE" --limit 30 --json databaseId,status,createdAt \
+  --jq "[.[] | select(.databaseId != ${GITHUB_RUN_ID:-0}) | select(.status != \"completed\")]" 2>/dev/null)
+[ -n "$UNFINISHED" ] || UNFINISHED='[]'
+# A newer run is already waiting: let that one carry on, so duplicates collapse back to one.
+NEWER=$(echo "$UNFINISHED" | jq "[.[] | select(.databaseId > ${GITHUB_RUN_ID:-0})] | length" 2>/dev/null)
+if [ "${NEWER:-0}" -gt 0 ]; then echo "后面已经排着更新的一次，这次不重复尝试。"; exit 0; fi
+# Hourly scheduled run = watchdog: step in only if no run started in the last 30 minutes (ignores runs stuck for longer).
 if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
-  OTHERS=$(gh run list -R "$GITHUB_REPOSITORY" -w "$WORKFLOW_FILE" --limit 20 --json databaseId,status \
-    --jq "[.[] | select(.databaseId != ${GITHUB_RUN_ID:-0}) | select(.status != \"completed\")] | length" 2>/dev/null)
-  if [ "${OTHERS:-0}" -gt 0 ]; then echo "接力还在进行，这次定时检查不重复尝试。"; exit 0; fi
+  ALIVE=$(echo "$UNFINISHED" | jq '[.[] | select((.createdAt | fromdateiso8601) > (now - 1800))] | length' 2>/dev/null)
+  if [ "${ALIVE:-0}" -gt 0 ]; then echo "接力还在进行，这次定时检查不重复尝试。"; exit 0; fi
   echo "接力已断，由定时检查重新接上。"
 fi
 
